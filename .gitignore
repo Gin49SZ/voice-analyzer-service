@@ -2,4 +2,5 @@
 run.log
 __pycache__
 speaker/speaker_tf_16k.wav
-models/
+models/*
+!models/.gitkeep
