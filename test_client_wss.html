@@ -40,6 +40,7 @@
     var ws = null;
     var record = null;
     var timeInte = null;
+    var closeTimer = null;
     var isRecording = false;
 
     recordButton.onclick = function() {
@@ -97,10 +98,20 @@
         ws.onmessage = function(evt) {
             console.log('Received message: ' + evt.data);
             try {
-                resJson = JSON.parse(evt.data)
+                var resJson = JSON.parse(evt.data);
+                if (resJson.code == 3) {
+                    // flush ack：尾部片段已处理完，可以安全断开
+                    closeSocket();
+                    return;
+                }
                 if (resJson.code == 0) {
-                    var jsonResponse = JSON.stringify(resJson, null, 4);
                     transcriptionResult.textContent += "\n" + (resJson.data || 'No speech recognized');
+                    // 每句的时间区间（相对音频流开始，毫秒）
+                    var sentences = resJson.sentences || [];
+                    sentences.forEach(function(s) {
+                        transcriptionResult.textContent +=
+                            "\n    [" + s.start_ms + "ms ~ " + s.end_ms + "ms] " + s.text;
+                    });
                 }
             } catch (e) {
                 console.error('Failed to parse response data', e);
@@ -121,13 +132,29 @@
         isRecording = true;
     }
 
+    function closeSocket() {
+        if (closeTimer) {
+            clearTimeout(closeTimer);
+            closeTimer = null;
+        }
+        if (ws && ws.readyState === 1) {
+            ws.close();
+        }
+    }
+
     function stopRecording() {
         console.log('Stop Recording');
-        if (ws) {
-            ws.close();
-            record.stop();
-            clearInterval(timeInte);
+        if (ws && ws.readyState === 1) {
+            // 请求服务端 flush 尾部片段：流式 VAD 不 flush 会丢掉最后一句话
+            ws.send('flush');
+            closeTimer = setTimeout(closeSocket, 1500);   // 兜底：等不到 ack 也断开
+        } else {
+            closeSocket();
         }
+        if (record) {
+            record.stop();
+        }
+        clearInterval(timeInte);
         recordButton.textContent = "Start Recording";
         recordButton.classList.remove("recording");
         isRecording = false;

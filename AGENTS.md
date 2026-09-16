@@ -18,8 +18,15 @@ Dockerfile uses CPU-only torch (`torch==2.3.0+cpu`).
 
 ## API endpoints
 - `POST /transcribe` — file upload, requires `apiKey` query param
-- `WS /ws/transcribe` — streaming audio, requires `apiKey` query param
+- `WS /ws/transcribe` — streaming audio, requires `apiKey` query param; text frame `flush`/`end`/`done`/`finish` triggers tail flush (replies `code=3` ack)
 - `GET /health`
+
+## Responses
+`TranscriptionResponse = {code, info, data, sentences}`.
+- `data` — plain text, unchanged from legacy (whole-file ASR for HTTP; per-segment ASR for WS)
+- `sentences` — `[{start_ms, end_ms, text}]`, times relative to audio start, derived from VAD segment boundaries
+- `timestamps.py` — pure helpers (punctuation split + intra-segment interpolation), no model deps
+- HTTP: runs VAD once on the whole audio then ASR per segment; `Config.data_from_full_asr=False` skips the extra whole-file ASR pass (use VAD-segment texts to build `data`)
 
 ## Models (offline, gitignored via `models/`)
 All models load from `models/` directory with `local_files_only=True`:
