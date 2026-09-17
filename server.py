@@ -23,6 +23,7 @@ import torch
 import torchaudio
 import io
 import os
+import subprocess
 
 from timestamps import build_sentences, clean_text
 
@@ -137,16 +138,78 @@ def transcribe_with_timing(*args, **kwargs):
     return result, elapsed_time
 
 
+# ---------------------------------------------------------------------------
+# VAD 调用参数：必须【每次显式写全】chunk_size / is_streaming_input / is_final
+#
+# 原因（已在容器内实测复现）：
+#   funasr 的 AutoModel.inference 前两行是
+#       kwargs = self.kwargs            # 直接引用模型对象自己的字典
+#       deep_update(kwargs, cfg)        # 把本次参数【就地】并进去，永久生效
+#   HTTP 整段识别与 WS 流式识别共用同一个 model_vad，于是：
+#     1) WS 传 chunk_size=300 / is_final=False → 永久粘在模型对象上；
+#     2) 之后 HTTP 只传 fs / batch_size_s → inference 里
+#        is_streaming_input = kwargs.get("is_streaming_input", True)  （因 chunk_size=300 < 15000）
+#        is_final           = kwargs.get("is_final", False)            ← 读到残留的 False
+#     3) forward 于是走流式分支，返回 [beg,-1] / [-1,end] 【事件对】而不是 [beg,end]【区间】，
+#        build_sentences 把 22 个片段误读成 44 个 → sentences 数量暴涨、大量 start_ms=0。
+#   实测：offline#1 = 22 个区间对；跑完一次 WS 流式会话后 offline#2 = 44 个事件对；
+#         显式写全参数后 offline#3 = 22 个区间对。
+#   结论：两条路径都显式声明自己的全部三个参数，任何一方都无法污染另一方。
+# ---------------------------------------------------------------------------
+VAD_OFFLINE_CHUNK_SIZE_MS = 60000  # 整段 VAD 分块大小，与 funasr 默认值一致
+
+
+def vad_offline(audio):
+    """整段（离线）VAD，返回 [beg_ms, end_ms] 区间对。
+
+    @param audio 单声道 float32 音频（16kHz）
+    @return model_vad.generate 的原始返回
+    """
+    return model_vad.generate(
+        input=audio,
+        fs=config.sample_rate,
+        batch_size_s=60,
+        chunk_size=VAD_OFFLINE_CHUNK_SIZE_MS,
+        is_streaming_input=False,
+        is_final=True,
+    )
+
+
+def vad_stream(chunk, cache, is_final=False):
+    """流式 VAD（WS 路径用），返回 [beg,-1] / [-1,end] 边界事件。
+
+    @param chunk 单个音频块（16kHz float32）；flush 时传空数组
+    @param cache 本 WS 会话持有的持久 cache
+    @param is_final 是否为本会话最后一次调用；flush 时必须 True，否则尾部片段丢失
+    @return model_vad.generate 的原始返回
+    """
+    return model_vad.generate(
+        input=chunk,
+        cache=cache,
+        is_final=is_final,
+        is_streaming_input=True,
+        chunk_size=config.chunk_size_ms,
+    )
+
+
 def vad_segments_of(audio):
     """整段音频跑一次 VAD，得到语音片段边界（毫秒，相对音频起点）。
 
     @param audio 单声道 float32 音频（16kHz）
     @return [[beg_ms, end_ms], ...]；无语音时为空列表
     """
-    result = model_vad.generate(input=audio, fs=config.sample_rate, batch_size_s=60)
+    result = vad_offline(audio)
     if not result or not result[0].get("value"):
         return []
-    return [[int(seg[0]), int(seg[1])] for seg in result[0]["value"]]
+    raw = result[0]["value"]
+    # 兜底探针：离线路径只应产出 [beg,end] 区间对。若出现 -1，说明参数被污染，走成了流式分支
+    # （见上方「VAD 调用参数」注释）。这里不静默吞掉，直接把问题喊出来。
+    negative = [seg for seg in raw if seg[0] < 0 or seg[1] < 0]
+    if negative:
+        logger.warning(f"[vad] offline path returned {len(negative)}/{len(raw)} streaming-style "
+                       f"event pair(s) {negative[:4]} —— is_streaming_input 疑似被污染，"
+                       f"请检查 VAD 调用参数是否写全")
+    return [[int(seg[0]), int(seg[1])] for seg in raw]
 
 
 def transcribe_by_vad_segments(audio):
@@ -170,6 +233,35 @@ def transcribe_by_vad_segments(audio):
     logger.info(f"vad segmentation elapsed: {(time.time() - start_time):.2f} seconds, "
                 f"{len(segments_ms)} segment(s)")
     return segments_ms, segment_texts
+
+
+# ---------------------------------------------------------------------------
+# webm 解码：必须走 ffmpeg 命令行，不能用 torchaudio
+#
+# 实测（容器内）：torchaudio 2.3.0+cpu 的 wheel **没有编译 ffmpeg 后端** ——
+#     torchaudio.list_audio_backends() == ['soundfile']
+#     torchaudio.load(..., backend='ffmpeg') → ValueError: Unsupported backend 'ffmpeg'
+# 而 libsndfile 不认识 webm 容器，于是原来那句 torchaudio.load(BytesIO(webm))
+# 必然抛 LibsndfileError: Format not recognised（HTTP 返回 code=1）。
+# 所以这里用 ffmpeg 命令行把容器格式转成 16bit PCM wav，再交给 soundfile 读。
+# 这也是镜像里必须装 ffmpeg 的唯一原因（代码中没有其它地方调用它）。
+# ---------------------------------------------------------------------------
+def decode_with_ffmpeg(data):
+    """把任意容器格式（webm / m4a / ...）转成 16bit PCM wav 后读出。
+
+    @param data 原始文件字节
+    @return (int16 ndarray, sample_rate)
+    """
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_s16le", "pipe:1"],
+        input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        # 把 ffmpeg 的 stderr 尾部带回给调用方，便于定位「不是有效音频」还是「缺解码器」
+        detail = proc.stderr.decode("utf-8", "replace").strip() or "ffmpeg produced no output"
+        raise HTTPException(status_code=400, detail=f"Failed to decode audio: {detail[-300:]}")
+    return sf.read(io.BytesIO(proc.stdout), dtype=np.int16)
 
 
 app = FastAPI()
@@ -253,10 +345,9 @@ async def transcribe_audio(
             is16 = True if bit_depth == 'PCM_16' else False
 
         elif file.content_type.startswith('audio/webm'):
-            input_wav, sr = torchaudio.load(io.BytesIO(file_content))
-            dtype = input_wav.dtype
-            is16 = True if dtype == np.int16 else False
-            input_wav = input_wav.squeeze().numpy()
+            # torchaudio 2.3.0+cpu 没有 ffmpeg 后端，webm 只能交给 ffmpeg 命令行解（见 decode_with_ffmpeg）
+            input_wav, sr = decode_with_ffmpeg(file_content)
+            is16 = True
         else:
             raise HTTPException(status_code=400, detail="Unsupported audio format")
 
@@ -396,12 +487,11 @@ async def websocket_endpoint(websocket: WebSocket):
             """把缓冲区里最后一段语音补吐出来。
 
             流式 VAD 不发 `is_final=True` 时，流尾片段的结束事件不会出现，
-            最后一句话会被丢掉（见 tmp/README.md 的实验结论）。
+            最后一句话会被丢掉（已在容器内实测复现）。
             """
             nonlocal last_vad_beg, last_vad_end
 
-            res = model_vad.generate(input=np.zeros(0, dtype=np.float32), cache=cache,
-                                     is_final=True, chunk_size=config.chunk_size_ms)
+            res = vad_stream(np.zeros(0, dtype=np.float32), cache, is_final=True)
             for segment in (res[0]["value"] if res and len(res[0]["value"]) else []):
                 if segment[0] > -1:
                     last_vad_beg = segment[0]
@@ -468,7 +558,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         await websocket.send_json(response.model_dump())
 
-                res = model_vad.generate(input=chunk, cache=cache, is_final=False, chunk_size=config.chunk_size_ms)
+                res = vad_stream(chunk, cache, is_final=False)
                 for segment in (res[0]["value"] if res and len(res[0]["value"]) else []):
                     # 流式 VAD 输出的是【边界事件】：[beg,-1] 为语音开始、[-1,end] 为语音结束，
                     # 坐标都是相对整个音频流起点的毫秒，配对后即可得到片段区间

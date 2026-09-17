@@ -1,9 +1,20 @@
 .vscode
+.workbuddy
+.idea
 run.log
 __pycache__
 .venv/
 .tools/
-speaker/speaker_tf_16k.wav
 models/*
 !models/.gitkeep
 tmp/
+
+# 离线构建产物（可重新生成，体积大）
+dist/
+wheelhouse/*
+!wheelhouse/.gitkeep
+debhouse/*
+!debhouse/.gitkeep
+
+# compose 本地变量覆盖（可能含内网源地址与凭据）
+.env

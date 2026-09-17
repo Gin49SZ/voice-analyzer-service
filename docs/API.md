@@ -3,7 +3,7 @@
 基于 FunASR（SenseVoiceSmall）+ FSMN-VAD + ERes2Net 说话人验证的音频转录服务。支持**音频文件上传转录**与 **WebSocket 流式转录**，两条链路都会为每句完整的话附带相对音频开始时刻的时间区间 `[start_ms, end_ms]`。
 
 > 本文档对应 `server.py` 当前实现（含 `sentences` 时间区间功能）。
-> 文中所有响应报文、状态码、关闭码均来自对真实端点的实测（验证脚本见 `tmp/test_timestamp_protocol.py`）。
+> 文中所有响应报文、状态码、关闭码均来自对真实端点的实测。
 
 ---
 
@@ -56,9 +56,15 @@ python server.py --port 27000 --gpu true # GPU
 | 通道 | 失败响应 |
 |---|---|
 | HTTP | `403` + `{"detail": "Invalid or missing API key. Please provide apiKey parameter."}` |
-| WS | 连接被拒绝，**关闭码 `1008`**，reason `Invalid or missing API key` |
+| WS | **HTTP `403` 握手拒绝**（服务端在 `accept()` 之前 `close(code=1008)`，Starlette 将其表现为握手失败） |
 
 > `apiKey` 缺失与错误**返回完全相同的响应**，不区分。
+>
+> ⚠️ **客户端注意**：WS 鉴权失败时浏览器拿到的是 `onclose` 且 `code=1006`（`onerror` 也会触发），
+> **不是 `1008`** —— 因为关闭发生在握手阶段，根本没有 WS 关闭帧可读。
+> `1008` 只是服务端源码里的意图（`server.py` 的 `websocket.close(code=1008, ...)`），
+> 只有在 `accept()` **之后**才可能以关闭码形式传给客户端。
+> 因此客户端判断鉴权失败应基于「是否成功 `onopen`」，不要只判 `1008`。
 
 ### 2.2 响应包装与 code 码表
 
@@ -164,11 +170,16 @@ python server.py --port 27000 --gpu true # GPU
 | `Content-Type` 前缀 | 解码方式 | 说明 |
 |---|---|---|
 | `audio/wav` | `soundfile` | WAV / PCM；按 `PCM_16` 子类型判定是否需要 int16 归一化 |
-| `audio/webm` | `torchaudio` | WebM / Opus 等 |
+| `audio/webm` | `ffmpeg` 命令行 | WebM / Opus 等容器格式，转成 16-bit PCM WAV 后再由 `soundfile` 读出 |
 
 其他类型（如 `audio/mpeg`、`application/octet-stream`）→ `400 Unsupported audio format`。
 
 > ⚠️ 格式判定**依赖客户端声明的 `Content-Type`**，而非文件真实内容。上传 MP3 却声称 `audio/wav` 会在解码阶段抛异常，最终表现为 `200 / code=1`。
+>
+> ⚠️ webm 分支**不能用 `torchaudio`**：`torchaudio 2.3.0+cpu` 的 wheel 没有编译 ffmpeg 后端
+> （实测 `torchaudio.list_audio_backends() == ['soundfile']`，指定 `backend="ffmpeg"` 会抛
+> `ValueError: Unsupported backend`），而 libsndfile 不认识 webm 容器 —— 所以改用 ffmpeg 命令行解码。
+> 解码失败时返回 `400`，`detail` 里带 ffmpeg 的 stderr 尾部。**这也是镜像必须装 ffmpeg 的唯一原因。**
 
 **音频预处理（服务端自动完成）**
 
@@ -279,7 +290,7 @@ ws://<host>:27000/ws/transcribe?apiKey=<KEY>&lang=zh&reg_spks=<URL编码的音�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `apiKey` | `string` | ✅ | — | API 密钥；缺失或错误 → 关闭码 `1008` |
+| `apiKey` | `string` | ✅ | — | API 密钥；缺失或错误 → **HTTP `403` 握手拒绝**（客户端表现为 `onclose` `code=1006`，详见 [2.1](#21-鉴权)） |
 | `lang` | `string` | ❌ | `zh` | 识别语言，传入 ASR 引擎 |
 | `reg_spks` | `string` | ❌ | `""` | 已注册说话人音频 URL，**逗号分隔**，整体需 URL 编码 |
 
@@ -379,7 +390,7 @@ flush
 | 场景 | 表现 |
 |---|---|
 | 客户端主动 `close()` | 正常断开；服务端清理缓存与缓冲区 |
-| `apiKey` 缺失/错误 | 关闭码 **`1008`**，reason `Invalid or missing API key` |
+| `apiKey` 缺失/错误 | **握手阶段即被拒**：服务端 `close(code=1008)` 在 `accept()` 之前，Starlette 表现为 HTTP `403`；客户端只会看到 `onclose` `code=1006`（详见 [2.1](#21-鉴权)） |
 | 服务端内部异常 | 记错误日志并关闭连接 |
 | `reg_spks` 非空但未命中说话人 | 该片段**不推送** `code=0`（仅可能出现 `code=2`），这是设计行为 |
 
@@ -434,7 +445,26 @@ function stopRecording() {
 }
 ```
 
-> 仓库内的 `test_client_wss.html` 为可直接运行的完整版本（已按上述时序实现）。
+**仓库内的 `test_client_wss.html`（浏览器直接打开即可运行）**
+
+按上述时序完整实现的测试客户端，重点是**把每句话的时间戳看清楚、可核对**：
+
+| 能力 | 说明 |
+|---|---|
+| 服务地址可切换 | 默认按当前页面同源推导（保留网关子路径），另有「本机 27000」「生产网关」预设 |
+| 上行参数对齐服务端 | 固定 **16 kHz / 16 bit / 单声道**，按 **300 ms 整块**（`Int16Array(4800)`）发送，帧边界与 `chunk_size_ms` 一致；设备采样率非 16 kHz 时自动软件重采样 |
+| `code=0` 增量卡片 | 每个 VAD 片段一张卡片，逐句显示 `mm:ss.mmm → mm:ss.mmm` 与原始毫秒值，并附 `avg_logprob`、可折叠的原始 `data` |
+| `code=2` 说话人命中 | 命中时单独列出 `data` 中的说话人标识 |
+| `code=3` 收尾 | 停止录音时先发 `flush`，收到 `code=3` 才关闭；`2.5 s` 未收到则超时兜底关闭并记日志 |
+| 汇总句子表 | 跨会话按会话号分组累计，含起止时间、时长、纯文本 |
+| **异常检测** | 逐句校验「零长度 / 负时间 / 与前句重叠」，命中即整行标红并弹出横幅 —— 这正是 [7.5](#75-实现陷阱vad-参数会被跨请求污染务必保持显式传参) 参数污染的症状，用于一眼发现回归 |
+| 逐句试听 | 本地录制同一路麦克风，解码为 `AudioBuffer` 后按该句起止时间精确播放（不依赖 webm 容器的 duration 元信息） |
+| 导出 | 句子表一键复制为 TSV（含 `start_ms` / `end_ms`），或导出含全部下行原始消息的 JSON |
+
+> 该页面的行为已逐项对照真实端点验证：上行 300 ms 整块、`flush` 换 `code=3`、
+> 时间戳单调且不超出已推流时长、错误 `apiKey` 表现为 HTTP `403` 握手拒绝。
+> 页面的渲染与异常检测逻辑另外用**真实抓取的下行消息**驱动验证过（含「真实数据不误报」
+> 与「污染形态必标红」两个方向）。
 
 **Python（websockets）**
 
@@ -529,16 +559,71 @@ $$\text{stop}_n = e$$
 | **时间连续性** | `sentences` 之间通常有静音间隙，**不连续** |
 | **极端情况** | 长停顿、音乐/噪声、语速剧烈变化时，VAD 边界精度会下降 |
 
-> 若需更高精度，需要在 `server.py` 中调整 VAD 参数 `max_end_silence_time`（默认 `500 ms`）与 `speech_noise_thres`（默认 `0.6`），或升级 funasr 以启用词级时间戳（当前钉版 `1.2.7` 不可用，实验见 `tmp/test_word_ts.py`）。
+> 若需更高精度，需要在 `server.py` 中调整 VAD 参数 `max_end_silence_time`（默认 `500 ms`）与 `speech_noise_thres`（默认 `0.6`），或升级 funasr 以启用词级时间戳（当前钉版 `1.2.7` 不支持）。
 
-### 7.4 实验与验证
+### 7.4 实测结论
 
-| 脚本 | 作用 |
+以下结论均由对真实端点的多轮实验得到，不再保留实验脚本：
+
+| 项目 | 结论 |
 |---|---|
-| `tmp/test_vad_timing.py` | 全文件 VAD 与「服务端式」流式 VAD 的片段时间 vs 真值 |
-| `tmp/test_asr_segments.py` | VAD 分段 + 逐段 ASR，产出 `out/result_segments.json`，做文本连续性校验 |
-| `tmp/test_word_ts.py` | 验证 SenseVoice `output_timestamp=True` 是否可用（结论：当前版本不可用） |
-| `tmp/test_timestamp_protocol.py` | **协议级回归**：假模型驱动真实路由，覆盖 HTTP/WS 两条链路的 `sentences`、flush、错误分支 |
+| VAD 片段时间 vs 真值 | 全文件 VAD 与「服务端式」流式 VAD 的偏差均在 **0～310 ms** 内 |
+| 分段 + 逐段转写 | 片段文本拼接与整段转写语义一致，文本连续性无缺口 |
+| `output_timestamp=True` | funasr `1.2.7` 下**不可用**，因此时间只能取自 VAD 边界 |
+| HTTP / WS 两条链路的 `sentences` | 协议级断言（含 flush、错误分支）全部通过 |
+| `HTTP → HTTP → WS 完整会话 → HTTP` 连续四次 | `sentences` **完全一致**（各 23 条），即 VAD 参数未被跨请求污染 |
+| 整段 ASR 文本重复性 | `use_itn=True` 偶发标点差异，`use_itn=False` 逐字节稳定（见 [7.6](#76-已知限制data-字段的-itn-标点抖动sentences-不受影响)）|
+
+### 7.5 实现陷阱：VAD 参数会被跨请求污染（务必保持显式传参）
+
+funasr 的 `AutoModel.inference()` 开头是这两行：
+
+```python
+kwargs = self.kwargs        # 直接引用「模型对象自己」的参数字典
+deep_update(kwargs, cfg)    # 把本次调用参数【就地】并进去，永久生效
+```
+
+也就是说，**任何一次调用传的参数都会粘在模型对象上**。而 HTTP 整段识别与 WS 流式识别共用同一个 `model_vad`，污染路径为：
+
+1. WS 传 `chunk_size=300`、`is_final=False` → 永久写入 `model_vad.kwargs`；
+2. 之后 HTTP 只传 `fs` / `batch_size_s` → `inference` 内部
+   `is_streaming_input = kwargs.get("is_streaming_input", True)`（因为残留的 `chunk_size=300 < 15000` 走了这个默认分支），`is_final` 则读到残留的 `False`；
+3. `forward` 于是走流式分支，返回 `[beg,-1]` / `[-1,end]` **事件对**而不是 `[beg,end]` **区间对**；
+4. `build_sentences` 把 22 个片段误读成 44 个 → `sentences` 数量暴涨、大量 `start_ms=0`。
+
+实测：干净进程里 `offline#1 = 22` 个区间对；跑完一次 WS 流式会话后 `offline#2 = 44` 个事件对；显式写全三个参数后 `offline#3 = 22` 个区间对。
+
+**因此 `server.py` 里两条路径都必须显式写全 `chunk_size` / `is_streaming_input` / `is_final`**，已封装为：
+
+| 函数 | 用途 | 固定参数 |
+|---|---|---|
+| `vad_offline(audio)` | HTTP 整段识别 | `chunk_size=60000, is_streaming_input=False, is_final=True` |
+| `vad_stream(chunk, cache, is_final)` | WS 流式识别 | `chunk_size=300, is_streaming_input=True, is_final=按收尾状态` |
+
+`vad_segments_of()` 里另有一道兜底探针：离线路径若出现负坐标片段，会打 `WARNING` 指名 `is_streaming_input` 疑似被污染。**新增任何 VAD 调用都不要绕过这两个包装函数。**
+
+### 7.6 已知限制：`data` 字段的 ITN 标点抖动（`sentences` 不受影响）
+
+**现象**：整段一次性转写（`data` 字段）在同一音频重复调用时，偶发相差一个标点。实测差异如：
+
+| 对比 | 实际文本片段 |
+|---|---|
+| A vs B | `这份经验是无价的。这东西最大的难点` / `这份经验是无价的。这个东西最大的难点` |
+| A vs C | `你没有后视镜的，枪炮是不长眼的` / `你没有后视镜的枪炮是不长眼的` |
+
+**隔离实验结论**：
+
+| 实验 | 结果 | 说明 |
+|---|---|---|
+| 连续整段，`use_itn=True` | 5 次出现 3 个不同值 | 抖动确实存在 |
+| 连续整段，**`use_itn=False`** | **5/5 逐字节一致** | 抖动**只来自 ITN 标点**环节 |
+| `OMP_NUM_THREADS=1` | 与默认线程数**完全同序同值** | 排除 CPU 多线程浮点归约 |
+| 逐段 ASR 文本（`sentences` 的来源） | 唯一值 **1/4、1/5** | **`sentences` 文本稳定** |
+| 端到端 4 次 HTTP（含一次 WS 会话） | `sentences` 完全一致 | 已由端到端实测确认 |
+
+**重要**：本功能交付的 `sentences` 字段（含每句 `start_ms`/`end_ms`）在所有测试中**始终稳定**；抖动只出现在**兼容性保留**的 `data` 纯文本字段上，且**先于本次 VAD 参数修复即存在**（该代码路径未被改动）。
+
+**取舍**：`data` 目前仍按旧行为调用一次整段转写（`config.data_from_full_asr=True`）。若要 `data` 也逐字节可复现，可把 `data_from_full_asr` 置为 `False`——`data` 改由逐段文本拼接，即与 `sentences` 同源，代价是丢失整段上下文带来的少量转写质量。更精确的根因（ITN 子模型内部）未继续深挖，因为它不影响对外契约中的时间信息。
 
 ---
 
@@ -648,15 +733,21 @@ SenseVoice 不输出时间戳，时间只能来自 VAD 片段边界。**片段�
 
 **Q6. 想要词级时间戳？**
 
-当前 funasr 钉版 `1.2.7` 下 SenseVoice 的 `output_timestamp=True` 不可用（见 `tmp/test_word_ts.py`）。需升级依赖后另行评估。
+当前 funasr 钉版 `1.2.7` 下 SenseVoice 的 `output_timestamp=True` 实测不可用。需升级依赖后另行评估。
 
-**Q7. 如何本地验证改动没破坏协议？**
+**Q7. 怎么确认改动没破坏协议？**
+
+服务起好后按三条路径各打一次即可（无需额外脚本）：
 
 ```bash
-python tmp/test_timestamp_protocol.py     # 38 项协议级断言
+# HTTP：文件转录，检查 sentences 时间单调、无零长、无重叠
+curl -X POST "http://127.0.0.1:27000/transcribe?apiKey=sk-7f3a9b2c1e5d8f4a6b0c9e2d1a5f8b3c" \
+     -F "file=@examples/test.wav;type=audio/wav"
+
+# WS：用 test_client_wss.html（浏览器打开，含逐句时间戳与异常检测）
 ```
 
-该脚本用**假模型**（替换 `funasr` / `modelscope` / `soundfile` / `torch` / `loguru`）加载**真实** `server.py`，通过 TestClient 驱动真实路由，**无需 torch 与模型文件**。依赖：`fastapi` `starlette` `pydantic` `pydantic-settings` `numpy` `httpx`。
+最需要盯的是 [7.5](#75-实现陷阱vad-参数会被跨请求污染务必保持显式传参) 那条：**先跑一次 WS 会话，再跑 HTTP**，两次的 `sentences` 必须完全一致。`test_client_wss.html` 会把「零长度 / 负时间 / 与前句重叠」的句子整行标红，出现红色就说明 VAD 参数被污染了。
 
 ---
 

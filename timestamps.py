@@ -7,7 +7,7 @@
 `model.py::inference()` 只返回 `key/text/avg_logprob`。因此时间信息只能来自
 funasr VAD（`speech_fsmn_vad_zh-cn-16k-common-pytorch`）给出的语音片段边界
 `[beg, end]`（毫秒，相对音频起点）。VAD 片段 = 一句完整的话（一个完整语句），
-即 tmp/ 实验验证后选定的方案（见 tmp/README.md，「VAD 分段 + 逐段 ASR」）。
+即隔离实验验证后选定的方案（「VAD 分段 + 逐段 ASR」）。
 
 本模块只做「VAD 片段边界 + 片段转写文本」→「句子 + [start_ms, end_ms]」的整理：
 
@@ -37,7 +37,7 @@ __all__ = [
 # SenseVoice 输出里的控制标记，例如 <|zh|><|NEUTRAL|><|Speech|><|withitn|>
 TAG_RE = re.compile(r"<\|[^|]*\|>")
 
-# 句末标点（与 tmp/test_asr_segments.py 的切分规则保持一致）
+# 句末标点（切分规则：连续标点算一个边界）
 SENT_END_RE = re.compile(r"[。！？；!?;…]+")
 
 VadSegment = Sequence[Union[int, float]]

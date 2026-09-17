@@ -1,272 +1,1000 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-    <meta charset="utf-8">
-    <title>WebSocket Audio Transcription</title>
-    <style>
-        #transcriptionResult {
-            white-space: pre-wrap; /* Preserve whitespace and line breaks */
-            background-color: #f5f5f5;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-family: monospace;
-        }
-        #recordButton.recording {
-            background-color: red;
-            color: white;
-        }
-    </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WS 流式转录测试客户端 · 句级时间戳</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --panel-3:#e9ecf1;
+    --border:#d8dde4; --text:#1d2129; --muted:#6b7280;
+    --accent:#2563eb; --accent-weak:#eef4ff;
+    --ok:#15803d; --ok-weak:#eaf7ee; --warn:#b45309; --warn-weak:#fdf4e3;
+    --err:#b91c1c; --err-weak:#fdeced; --live:#dc2626;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#101317; --panel:#171b21; --panel-2:#1d232b; --panel-3:#232a33;
+      --border:#2c333d; --text:#e6e9ee; --muted:#98a2b3;
+      --accent:#6ea8fe; --accent-weak:#1a2433;
+      --ok:#4ade80; --ok-weak:#132318; --warn:#fbbf24; --warn-weak:#2a2113;
+      --err:#f87171; --err-weak:#2c1618; --live:#f87171;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:18px 20px 40px; background:var(--bg); color:var(--text);
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  h1{font-size:17px;margin:0 0 2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  h2{font-size:13px;margin:0 0 8px;color:var(--muted);font-weight:600;letter-spacing:.03em}
+  code{font-family:var(--mono);font-size:.92em}
+  .tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:999px;
+       background:var(--accent-weak);color:var(--accent);border:1px solid var(--border)}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 14px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px 14px}
+  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+  label.wide{grid-column:1/-1}
+  input[type=text]{
+    padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--panel-2);
+    color:var(--text);font-size:13px;font-family:var(--mono)
+  }
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .mt{margin-top:12px}
+  button{
+    padding:7px 13px;border:1px solid var(--border);border-radius:6px;background:var(--panel-2);
+    color:var(--text);font-size:13px;cursor:pointer;font-family:inherit
+  }
+  button:hover:not(:disabled){background:var(--panel-3)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover:not(:disabled){filter:brightness(1.1)}
+  button.primary.rec{background:var(--live);border-color:var(--live)}
+  button.mini{padding:2px 8px;font-size:11px}
+  .pill{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--border);
+        background:var(--panel-2);color:var(--muted);font-weight:600}
+  .pill.live{color:var(--live);border-color:var(--live);background:var(--err-weak)}
+  .pill.wait{color:var(--warn);border-color:var(--warn);background:var(--warn-weak)}
+  .pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-weak)}
+  .pill.bad{color:var(--err);border-color:var(--err);background:var(--err-weak)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:14px}
+  .tile{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:9px 12px}
+  .tile .k{font-size:11px;color:var(--muted);letter-spacing:.03em}
+  .tile .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:2px}
+  .tile .v.err{color:var(--err)}
+  .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+  @media (max-width:1100px){.cols{grid-template-columns:minmax(0,1fr)}}
+  .panelbox{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px}
+  .stream{max-height:56vh;overflow:auto;display:flex;flex-direction:column;gap:8px}
+  .empty{color:var(--muted);font-size:12px;padding:18px 4px;text-align:center}
+  .seg{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:7px;
+       background:var(--panel-2);padding:8px 10px}
+  .seg .head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .seg .head .no{font-weight:700;color:var(--accent);font-family:var(--mono)}
+  .seg .head .span{font-family:var(--mono);color:var(--text)}
+  .seg .head .meta{margin-left:auto;font-family:var(--mono);font-size:11px}
+  .seg .raw{margin-top:6px;font-size:11px;color:var(--muted);word-break:break-all}
+  .seg .raw summary{cursor:pointer;user-select:none}
+  .sent{display:flex;gap:8px;align-items:baseline;margin-top:5px;font-size:13px}
+  .sent .idx{flex:0 0 18px;color:var(--muted);font-family:var(--mono);font-size:11px;text-align:right}
+  .sent .ts{flex:0 0 auto;font-family:var(--mono);font-size:11px;color:var(--accent);
+            background:var(--accent-weak);border-radius:4px;padding:1px 6px;white-space:nowrap}
+  .sent .tx{flex:1 1 auto;word-break:break-word}
+  .sent.bad .ts{color:var(--err);background:var(--err-weak)}
+  .sent .flag{font-size:10px;color:var(--err);border:1px solid var(--err);border-radius:3px;padding:0 4px}
+  table{border-collapse:collapse;width:100%;font-size:12px}
+  th,td{padding:5px 7px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;position:sticky;top:0;background:var(--panel);z-index:1}
+  td.mono{font-family:var(--mono);white-space:nowrap}
+  tr.anomaly td{background:var(--err-weak)}
+  tr.anomaly td.mono{color:var(--err)}
+  tr.divider td{background:var(--panel-2);color:var(--muted);font-size:11px;text-align:center;
+                font-family:var(--mono);padding:3px 7px}
+  .tablewrap{max-height:46vh;overflow:auto;border:1px solid var(--border);border-radius:7px}
+  .hint{font-size:11px;color:var(--muted);margin:6px 0 0}
+  .notes{margin-top:10px;font-size:12px;color:var(--muted);max-height:110px;overflow:auto;
+         font-family:var(--mono);white-space:pre-wrap}
+  .banner{border-radius:7px;padding:8px 11px;font-size:12px;margin-bottom:12px;display:none}
+  .banner.show{display:block}
+  .banner.err{background:var(--err-weak);border:1px solid var(--err);color:var(--err)}
+  .banner.warn{background:var(--warn-weak);border:1px solid var(--warn);color:var(--warn)}
+  details.rawlog{margin-top:6px}
+  details.rawlog summary{cursor:pointer;font-size:12px;color:var(--muted)}
+  pre#rawLog{background:var(--panel-2);border:1px solid var(--border);border-radius:7px;
+             padding:9px;font-size:11px;line-height:1.5;max-height:300px;overflow:auto;
+             white-space:pre-wrap;word-break:break-all;margin:8px 0 0}
+  audio{width:100%;margin-top:4px}
+  .kv{display:flex;gap:6px;font-family:var(--mono);font-size:12px;margin-bottom:2px}
+  .kv .k{color:var(--muted);flex:0 0 118px}
+  .kv .v{word-break:break-all}
+</style>
 </head>
 <body>
-    <div>
-        <button id="recordButton">Start Recording</button>
-        <label>
-            language:
-            <input id="lang" type="text" value="auto" />
-        </label>
-        <label>
-            <input type="checkbox" id="speakerVerification"> Speaker Verification
-        </label>
-        <hr />
-        Transcription result will be displayed below:
-        <p id="transcriptionResult"></p>
+
+<h1>
+  WS 流式转录测试客户端
+  <span class="tag">句级时间戳</span>
+  <span class="tag">code 0 / 2 / 3</span>
+</h1>
+<p class="sub">
+  对齐当前 <code>/ws/transcribe</code> 协议：每个 VAD 片段闭合即回一条 <code>code=0</code>，
+  其 <code>sentences[]</code> 携带相对<strong>音频流起点</strong>的绝对毫秒区间。
+  停止录音会先发 <code>flush</code> 并等 <code>code=3</code> 确认，避免丢尾句。
+</p>
+
+<div class="card">
+  <div class="grid">
+    <label class="wide">服务地址（WebSocket URL）
+      <input id="wsUrl" type="text" spellcheck="false" />
+    </label>
+    <label>apiKey
+      <input id="apiKey" type="text" spellcheck="false" />
+    </label>
+    <label>lang（识别语言）
+      <input id="lang" type="text" value="zh" spellcheck="false" />
+    </label>
+    <label class="wide">reg_spks（可选，逗号分隔的说话人音频 URL；留空则关闭说话人验证）
+      <input id="regSpks" type="text" spellcheck="false"
+             placeholder="https://example.com/a.wav,https://example.com/b.wav" />
+    </label>
+  </div>
+
+  <div class="row mt">
+    <span style="font-size:12px;color:var(--muted)">服务地址预设：</span>
+    <button class="mini" data-preset="local">本机 27000</button>
+    <button class="mini" data-preset="page">当前页面同源</button>
+    <button class="mini" data-preset="prod">生产网关</button>
+  </div>
+
+  <div class="row mt">
+    <button id="recordButton" class="primary">开始录音</button>
+    <button id="clearBtn" disabled>清空结果</button>
+    <button id="exportBtn" disabled>导出 JSON</button>
+    <button id="copyBtn" disabled>复制句子表（TSV）</button>
+    <span class="pill" id="statusPill">未连接</span>
+    <label style="flex-direction:row;align-items:center;gap:5px;font-size:12px">
+      <input type="checkbox" id="autoScroll" checked /> 自动滚动
+    </label>
+  </div>
+
+  <div class="notes" id="notes"></div>
+</div>
+
+<div class="banner" id="banner"></div>
+
+<div class="stats">
+  <div class="tile"><div class="k">音频流时间轴（时间戳基准）</div><div class="v" id="stClock">00:00.000</div></div>
+  <div class="tile"><div class="k">已上行音频</div><div class="v" id="stBytes">0 B</div></div>
+  <div class="tile"><div class="k">下行消息 / 片段</div><div class="v" id="stMsgs">0 / 0</div></div>
+  <div class="tile"><div class="k">已识别句子</div><div class="v" id="stSents">0</div></div>
+  <div class="tile"><div class="k">异常句子</div><div class="v" id="stBad">0</div></div>
+</div>
+
+<div class="cols">
+  <div>
+    <div class="panelbox">
+      <h2>实时片段消息</h2>
+      <div class="stream" id="streamLive"><div class="empty">点击「开始录音」后，每个闭合的 VAD 片段会作为一张卡片出现在这里</div></div>
     </div>
-</body>
+  </div>
+
+  <div>
+    <div class="panelbox">
+      <h2>汇总句子表 · <span id="sentCount">0</span> 句</h2>
+      <div id="playerBox" hidden>
+        <audio id="player" controls></audio>
+        <p class="hint" id="playerHint">本地录音回放：点任意一行的 ▶ 即按该句的起止时间精确播放。</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:34px">#</th>
+              <th>时间区间（起 → 止）</th>
+              <th style="width:66px">时长</th>
+              <th>句子</th>
+              <th style="width:46px">试听</th>
+            </tr>
+          </thead>
+          <tbody id="sentBody"></tbody>
+        </table>
+      </div>
+      <p class="hint">
+        区间列同时给出 <code>mm:ss.mmm</code> 与原始毫秒值。红底行表示时间轴异常（零长度 / 负时间 / 与前句重叠）——
+        这正是历史上 VAD 参数被跨请求污染时的症状，便于一眼发现回归。
+      </p>
+    </div>
+
+    <div class="panelbox">
+      <h2>说话人命中（<code>code=2</code>）</h2>
+      <div id="speakerLog"><div class="empty" style="padding:8px 4px">本次会话未传入 reg_spks，或尚未命中</div></div>
+    </div>
+
+    <div class="panelbox">
+      <h2>连接与配置</h2>
+      <div class="kv"><span class="k">实际连接地址</span><span class="v" id="kvUrl">—</span></div>
+      <div class="kv"><span class="k">收尾策略</span><span class="v" id="kvFlush">—</span></div>
+      <div class="kv"><span class="k">回放校准</span><span class="v" id="kvCalib">—</span></div>
+      <details class="rawlog">
+        <summary>原始下行消息日志（协议调试）</summary>
+        <pre id="rawLog"></pre>
+      </details>
+    </div>
+  </div>
+</div>
+
 <script>
-    var recordButton = document.getElementById('recordButton');
-    var transcriptionResult = document.getElementById('transcriptionResult');
-    navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia;
-    var ws = null;
-    var record = null;
-    var timeInte = null;
-    var closeTimer = null;
-    var isRecording = false;
+(function () {
+  "use strict";
 
-    recordButton.onclick = function() {
-        if (!isRecording) {
-            startRecording();
-        } else {
-            stopRecording();
-        }
+  // ===== 与服务端对齐的常量 =================================================
+  var DEFAULT_KEY   = "sk-7f3a9b2c1e5d8f4a6b0c9e2d1a5f8b3c";
+  var TARGET_RATE   = 16000;                            // 服务端固定 16 kHz
+  var CHUNK_MS      = 300;                              // = Config.chunk_size_ms
+  var CHUNK_SAMPLES = TARGET_RATE * CHUNK_MS / 1000;     // 4800 样本 = 9600 字节
+  var SEND_TICK_MS  = 100;                              // 攒块发送的轮询间隔
+  var FLUSH_TIMEOUT_MS = 2500;                          // 等不到 code=3 的兜底
+  var NOTES_MAX     = 40;
+  var WS_PATH       = "ws/transcribe";
+  var PROD_URL      = "wss://tymh.whhealth.org.cn/GWY/znldxtyy/ws/transcribe";
+
+  // ===== DOM ==============================================================
+  function $(id) { return document.getElementById(id); }
+  var el = {
+    wsUrl: $("wsUrl"), apiKey: $("apiKey"), lang: $("lang"), regSpks: $("regSpks"),
+    recordButton: $("recordButton"), clearBtn: $("clearBtn"), exportBtn: $("exportBtn"),
+    copyBtn: $("copyBtn"), statusPill: $("statusPill"), autoScroll: $("autoScroll"),
+    notes: $("notes"), banner: $("banner"),
+    stClock: $("stClock"), stBytes: $("stBytes"), stMsgs: $("stMsgs"),
+    stSents: $("stSents"), stBad: $("stBad"),
+    streamLive: $("streamLive"), sentBody: $("sentBody"), sentCount: $("sentCount"),
+    playerBox: $("playerBox"), player: $("player"), playerHint: $("playerHint"),
+    speakerLog: $("speakerLog"), rawLog: $("rawLog"),
+    kvUrl: $("kvUrl"), kvFlush: $("kvFlush"), kvCalib: $("kvCalib")
+  };
+
+  // ===== 会话状态 ==========================================================
+  var S = {
+    ws: null, opened: false, stopped: false, recording: false,
+    stream: null, ctx: null, source: null, processor: null, silentGain: null,
+    mediaRecorder: null, mediaChunks: [], mediaUrl: null,
+    playbackCtx: null, playbackBuffer: null, playbackSrc: null,
+    pending: [], pendingLen: 0,
+    sentSamples: 0, sendTimer: null, flushTimer: null, clockTimer: null,
+    session: 0, seq: 0, segCount: 0,
+    messages: [], sentences: [], prevEndMs: null,
+    bannerLock: false
+  };
+
+  // ===== 小工具 ============================================================
+  function pad(n, w) { n = String(Math.max(0, Math.round(n))); while (n.length < w) n = "0" + n; return n; }
+
+  function fmtClock(ms) {                      // 12345 -> "00:12.345"
+    ms = Math.max(0, Math.round(ms));
+    return pad(Math.floor(ms / 60000), 2) + ":" + pad(Math.floor(ms % 60000 / 1000), 2) + "." + pad(ms % 1000, 3);
+  }
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(2) + " MB";
+  }
+
+  function note(text) {
+    var line = "[" + new Date().toLocaleTimeString("zh-CN", { hour12: false }) + "] " + text;
+    el.notes.textContent = (el.notes.textContent ? el.notes.textContent + "\n" : "") + line;
+    var lines = el.notes.textContent.split("\n");
+    if (lines.length > NOTES_MAX) el.notes.textContent = lines.slice(-NOTES_MAX).join("\n");
+    el.notes.scrollTop = el.notes.scrollHeight;
+  }
+
+  function setStatus(kind, text) {
+    el.statusPill.className = "pill " + kind;
+    el.statusPill.textContent = text;
+  }
+
+  function showBanner(text, kind) {
+    el.banner.textContent = text;
+    el.banner.className = "banner " + (kind || "warn") + " show";
+    el.banner.dataset.kind = kind || "warn";
+  }
+  function hideBanner(force) {
+    // 协议级错误（err）不被后续正常消息清掉，需手动开新会话或点清空
+    if (!force && el.banner.dataset.kind === "err") return;
+    el.banner.className = "banner";
+    el.banner.textContent = "";
+    el.banner.dataset.kind = "";
+  }
+
+  function rawLog(text) {
+    el.rawLog.textContent += text + "\n";
+    el.rawLog.scrollTop = el.rawLog.scrollHeight;
+  }
+
+  // 页面同源时推导 WS 地址（保留网关子路径，如 /GWY/znldxtyy/）
+  function pageDerivedUrl() {
+    var loc = window.location;
+    if (loc.protocol !== "http:" && loc.protocol !== "https:") return null;
+    var proto = loc.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + loc.host + loc.pathname.replace(/\/[^\/]*$/, "/") + WS_PATH;
+  }
+
+  function buildUrl(cfg) {
+    var params = ["apiKey=" + encodeURIComponent(cfg.key)];
+    if (cfg.lang) params.push("lang=" + encodeURIComponent(cfg.lang));
+    // reg_spks 是「整个逗号分隔串」编码一次，对应服务端 parse_qs + unquote
+    if (cfg.regSpks) params.push("reg_spks=" + encodeURIComponent(cfg.regSpks));
+    return cfg.base + (cfg.base.indexOf("?") >= 0 ? "&" : "?") + params.join("&");
+  }
+
+  function readConfig() {
+    return {
+      base: el.wsUrl.value.trim(),
+      key: el.apiKey.value.trim(),
+      lang: el.lang.value.trim(),
+      regSpks: el.regSpks.value.split(",").map(function (s) { return s.trim(); })
+                    .filter(Boolean).join(",")
     };
+  }
 
-    function startRecording() {
-        console.log('Start Recording');
-        var speakerVerificationCheckbox = document.getElementById('speakerVerification');
-        var sv = speakerVerificationCheckbox.checked ? 1 : 0;
-        var lang = document.getElementById("lang").value
-        // Construct the query parameters
-        var queryParams = [];
-        if (lang) {
-            queryParams.push(`lang=${lang}`);
-        }
-        // 添加 API Key
-        var apiKey = 'sk-7f3a9b2c1e5d8f4a6b0c9e2d1a5f8b3c';
-        queryParams.push(`apiKey=${apiKey}`);
-        if (sv) {
-            queryParams.push('sv=1');
-        }
-        var queryString = queryParams.length > 0 ? `?${queryParams.join('&')}` : '';
+  // ===== 统计面板 ==========================================================
+  function refreshStats() {
+    el.stClock.textContent = fmtClock(S.sentSamples * 1000 / TARGET_RATE);
+    el.stBytes.textContent = fmtBytes(S.sentSamples * 2);
+    el.stMsgs.textContent = S.seq + " / " + S.segCount;
+    el.stSents.textContent = S.sentences.length;
+    var bad = S.sentences.filter(function (s) { return s.flag; }).length;
+    el.stBad.textContent = bad;
+    el.stBad.className = "v" + (bad ? " err" : "");
+  }
 
-        ws = new WebSocket(`wss://tymh.whhealth.org.cn/GWY/znldxtyy/ws/transcribe${queryString}`);
-        // ws = new WebSocket(`ws://localhost:27000/ws/transcribe${queryString}`);
-        // ws = new WebSocket(`ws://localhost:8089/ws/transcribe${queryString}`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = function(event) {
-            console.log('WebSocket connection established');
-            record.start();
-            timeInte = setInterval(function() {
-                if(ws.readyState === 1) {
-                    var audioBlob = record.getBlob();
-                    console.log('Blob size: ', audioBlob.size);
-
-                    // Read the Blob content for debugging
-                    var reader = new FileReader();
-                    reader.onloadend = function() {
-                        console.log('Blob content: ', new Uint8Array(reader.result));
-                        ws.send(audioBlob);
-                        console.log('Sending audio data');
-                        record.clear();
-                    };
-                    reader.readAsArrayBuffer(audioBlob);
-                }
-            }, 500);
-        };
-
-        ws.onmessage = function(evt) {
-            console.log('Received message: ' + evt.data);
-            try {
-                var resJson = JSON.parse(evt.data);
-                if (resJson.code == 3) {
-                    // flush ack：尾部片段已处理完，可以安全断开
-                    closeSocket();
-                    return;
-                }
-                if (resJson.code == 0) {
-                    transcriptionResult.textContent += "\n" + (resJson.data || 'No speech recognized');
-                    // 每句的时间区间（相对音频流开始，毫秒）
-                    var sentences = resJson.sentences || [];
-                    sentences.forEach(function(s) {
-                        transcriptionResult.textContent +=
-                            "\n    [" + s.start_ms + "ms ~ " + s.end_ms + "ms] " + s.text;
-                    });
-                }
-            } catch (e) {
-                console.error('Failed to parse response data', e);
-                transcriptionResult.textContent += "\n" + evt.data;
-            }
-        };
-
-        ws.onclose = function() {
-            console.log('WebSocket connection closed');
-        };
-
-        ws.onerror = function(error) {
-            console.error('WebSocket error: ' + error);
-        };
-
-        recordButton.textContent = "Stop Recording";
-        recordButton.classList.add("recording");
-        isRecording = true;
+  // ===== 采集：麦克风 -> 16kHz / 16bit / 单声道 PCM =========================
+  function floatToInt16(f32) {
+    var out = new Int16Array(f32.length);
+    for (var i = 0; i < f32.length; i++) {
+      var v = f32[i];
+      if (v > 1) v = 1; else if (v < -1) v = -1;
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
     }
+    return out;
+  }
 
-    function closeSocket() {
-        if (closeTimer) {
-            clearTimeout(closeTimer);
-            closeTimer = null;
-        }
-        if (ws && ws.readyState === 1) {
-            ws.close();
-        }
+  // 平均法降采样（仅当浏览器没按 16k 建立 AudioContext 时才用到）
+  function downsample(f32, fromRate, toRate) {
+    if (fromRate === toRate) return f32;
+    var ratio = fromRate / toRate;
+    var len = Math.round(f32.length / ratio);
+    var out = new Float32Array(len);
+    var outIdx = 0, inIdx = 0;
+    while (outIdx < len) {
+      var next = Math.round((outIdx + 1) * ratio);
+      var sum = 0, cnt = 0;
+      for (var i = inIdx; i < next && i < f32.length; i++) { sum += f32[i]; cnt++; }
+      out[outIdx] = cnt ? sum / cnt : 0;
+      outIdx++;
+      inIdx = next;
     }
+    return out;
+  }
 
-    function stopRecording() {
-        console.log('Stop Recording');
-        if (ws && ws.readyState === 1) {
-            // 请求服务端 flush 尾部片段：流式 VAD 不 flush 会丢掉最后一句话
-            ws.send('flush');
-            closeTimer = setTimeout(closeSocket, 1500);   // 兜底：等不到 ack 也断开
+  function pushSamples(i16) {
+    if (!i16.length) return;
+    S.pending.push(i16);
+    S.pendingLen += i16.length;
+  }
+
+  // 按 300ms 整块上行，帧边界与服务端 chunk_size_ms 对齐
+  function drainChunks() {
+    if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+    while (S.pendingLen >= CHUNK_SAMPLES) {
+      var out = new Int16Array(CHUNK_SAMPLES);
+      var off = 0;
+      while (off < CHUNK_SAMPLES) {
+        var head = S.pending[0];
+        var need = CHUNK_SAMPLES - off;
+        if (head.length <= need) {
+          out.set(head, off); off += head.length; S.pendingLen -= head.length; S.pending.shift();
         } else {
-            closeSocket();
+          out.set(head.subarray(0, need), off); off += need; S.pendingLen -= need;
+          S.pending[0] = head.subarray(need);
         }
-        if (record) {
-            record.stop();
-        }
-        clearInterval(timeInte);
-        recordButton.textContent = "Start Recording";
-        recordButton.classList.remove("recording");
-        isRecording = false;
+      }
+      S.ws.send(out.buffer);
+      S.sentSamples += CHUNK_SAMPLES;
     }
+    refreshStats();
+  }
 
-    function init(rec) {
-        record = rec;
+  function startCapture() {
+    var needResample = false;
+    try {
+      S.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+    } catch (e) {
+      S.ctx = new (window.AudioContext || window.webkitAudioContext)();
     }
+    // Chrome 会按请求的 16k 建立（内部自动重采样）；Safari 等可能忽略，此时手动降采样
+    needResample = Math.abs(S.ctx.sampleRate - TARGET_RATE) > 1;
+    note("AudioContext 采样率 " + S.ctx.sampleRate + " Hz" +
+         (needResample ? " → 已启用软件重采样到 " + TARGET_RATE + " Hz" : "（无需重采样）"));
 
-    if (!navigator.getUserMedia) {
-        alert('Your browser does not support audio input');
+    S.source = S.ctx.createMediaStreamSource(S.stream);
+    S.processor = S.ctx.createScriptProcessor(4096, 1, 1);
+    S.processor.onaudioprocess = function (e) {
+      if (!S.recording) return;
+      var f32 = e.inputBuffer.getChannelData(0);
+      pushSamples(floatToInt16(needResample ? downsample(f32, S.ctx.sampleRate, TARGET_RATE) : f32));
+    };
+    // ScriptProcessor 必须被连接才会触发，但直连 destination 会把麦克风声音外放造成啸叫，
+    // 因此串一个 0 增益节点
+    S.silentGain = S.ctx.createGain();
+    S.silentGain.gain.value = 0;
+    S.source.connect(S.processor);
+    S.processor.connect(S.silentGain);
+    S.silentGain.connect(S.ctx.destination);
+
+    startLocalRecorder();
+  }
+
+  // 本地录音只用于「试听校验时间戳」，失败不影响主流程
+  function startLocalRecorder() {
+    if (typeof window.MediaRecorder === "undefined") {
+      el.kvCalib.textContent = "本浏览器不支持 MediaRecorder，无法试听";
+      return;
+    }
+    try {
+      var mime = "";
+      ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"].some(function (m) {
+        if (MediaRecorder.isTypeSupported(m)) { mime = m; return true; }
+        return false;
+      });
+      S.mediaChunks = [];
+      S.mediaRecorder = mime ? new MediaRecorder(S.stream, { mimeType: mime }) : new MediaRecorder(S.stream);
+      S.mediaRecorder.ondataavailable = function (e) { if (e.data && e.data.size) S.mediaChunks.push(e.data); };
+      S.mediaRecorder.onstop = function () { buildPlayback(); };
+      S.mediaRecorder.start(250);
+      el.kvCalib.textContent = "已开始本地录音";
+    } catch (err) {
+      S.mediaRecorder = null;
+      el.kvCalib.textContent = "本地录音失败：" + err.message;
+      note("本地录音启动失败（不影响转录）：" + err.message);
+    }
+  }
+
+  // 解码成 AudioBuffer 后用 AudioBufferSourceNode 按区间精确播放：
+  // MediaRecorder 产出的 webm 常缺 duration 元信息，<audio> 直接 seek 不可靠
+  function buildPlayback() {
+    if (!S.mediaChunks.length) return;
+    var blob = new Blob(S.mediaChunks, { type: S.mediaChunks[0].type || "audio/webm" });
+    if (S.mediaUrl) URL.revokeObjectURL(S.mediaUrl);
+    S.mediaUrl = URL.createObjectURL(blob);
+    el.player.src = S.mediaUrl;
+    el.playerBox.hidden = false;
+
+    blob.arrayBuffer().then(function (ab) {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      S.playbackCtx = ctx;
+      return new Promise(function (resolve, reject) {
+        // 兼容回调式与 Promise 式两种签名
+        var p = ctx.decodeAudioData(ab, resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+    }).then(function (buf) {
+      S.playbackBuffer = buf;
+      var pushed = S.sentSamples / TARGET_RATE;
+      var delta = (buf.duration - pushed) * 1000;
+      el.kvCalib.textContent = "回放 " + buf.duration.toFixed(3) + " s / 推流 " + pushed.toFixed(3) +
+                               " s（差值 " + delta.toFixed(0) + " ms，含启动与编码缓冲）";
+      renderTable();                       // 回放就绪后启用「试听」按钮
+      note("本地回放已就绪，可逐句试听校验时间戳");
+    }).catch(function (err) {
+      el.kvCalib.textContent = "回放解码失败：" + err.message;
+    });
+  }
+
+  function playRange(startMs, endMs) {
+    if (!S.playbackBuffer || !S.playbackCtx) { note("本地回放不可用，无法试听该句"); return; }
+    stopPlayback();
+    S.playbackCtx.resume();
+    var start = Math.max(0, startMs / 1000);
+    if (start >= S.playbackBuffer.duration) { note("该句起点超出回放音频长度"); return; }
+    var dur = Math.max(0.05, (endMs - startMs) / 1000);
+    var src = S.playbackCtx.createBufferSource();
+    src.buffer = S.playbackBuffer;
+    src.connect(S.playbackCtx.destination);
+    src.start(0, start, Math.min(dur, S.playbackBuffer.duration - start));
+    S.playbackSrc = src;
+  }
+
+  function stopPlayback() {
+    if (S.playbackSrc) { try { S.playbackSrc.stop(); } catch (e) {} S.playbackSrc = null; }
+  }
+
+  // ===== 时间轴异常检测 ====================================================
+  // 零长度 / 负时间 / 与前句重叠 —— 都是「VAD 返回事件对而非区间对」时代的典型症状
+  function annotateFlags(newSents) {
+    newSents.forEach(function (s) {
+      var flags = [];
+      if (s.start_ms < 0 || s.end_ms < 0) flags.push("负时间");
+      else if (s.end_ms <= s.start_ms) flags.push("零长度");
+      if (S.prevEndMs !== null && s.start_ms < S.prevEndMs - 1) flags.push("与前句重叠");
+      s.flag = flags.join("/");
+      if (S.prevEndMs === null || s.end_ms > S.prevEndMs) S.prevEndMs = s.end_ms;
+    });
+  }
+
+  function refreshBanner() {
+    var bad = S.sentences.filter(function (s) { return s.flag; }).length;
+    if (bad) {
+      showBanner("检测到 " + bad + " 条时间轴异常句子（零长度 / 负时间 / 与前句重叠）。历史上这对应 VAD 参数被跨请求污染" +
+                 "（服务端返回 [beg,-1]/[-1,end] 事件对而非 [beg,end] 区间对），请核对服务端日志中的「vad segments」行。",
+                 "warn");
     } else {
-        navigator.getUserMedia(
-            { audio: true },
-            function(mediaStream) {
-                init(new Recorder(mediaStream));
-            },
-            function(error) {
-                console.log(error);
-            }
-        );
+      hideBanner();
+    }
+  }
+
+  // ===== 渲染：单个片段卡片 ================================================
+  function parseAvgLogprob(msg) {
+    try {
+      var info = JSON.parse(msg.info);
+      return (typeof info.avg_logprob === "number") ? info.avg_logprob : null;
+    } catch (e) { return null; }
+  }
+
+  function renderSegmentCard(seq, sentences, msg) {
+    if (el.streamLive.querySelector(".empty")) el.streamLive.innerHTML = "";
+
+    var card = document.createElement("div");
+    card.className = "seg";
+
+    var head = document.createElement("div");
+    head.className = "head";
+    var no = document.createElement("span");
+    no.className = "no"; no.textContent = "#" + seq;
+    head.appendChild(no);
+
+    var span = document.createElement("span");
+    span.className = "span";
+    span.textContent = sentences.length
+      ? fmtClock(sentences[0].start_ms) + " → " + fmtClock(sentences[sentences.length - 1].end_ms)
+      : "(空片段)";
+    head.appendChild(span);
+
+    var meta = document.createElement("span");
+    meta.className = "meta";
+    var alb = parseAvgLogprob(msg);
+    meta.textContent = sentences.length + " 句" + (alb === null ? "" : " · avg_logprob " + alb.toFixed(3));
+    head.appendChild(meta);
+    card.appendChild(head);
+
+    sentences.forEach(function (s, i) {
+      var row = document.createElement("div");
+      row.className = "sent" + (s.flag ? " bad" : "");
+
+      var idx = document.createElement("span");
+      idx.className = "idx"; idx.textContent = (i + 1);
+      row.appendChild(idx);
+
+      var ts = document.createElement("span");
+      ts.className = "ts";
+      ts.textContent = fmtClock(s.start_ms) + "→" + fmtClock(s.end_ms) +
+                       "  [" + s.start_ms + "–" + s.end_ms + " ms]";
+      row.appendChild(ts);
+
+      var tx = document.createElement("span");
+      tx.className = "tx"; tx.textContent = s.text;
+      row.appendChild(tx);
+
+      if (s.flag) {
+        var fl = document.createElement("span");
+        fl.className = "flag"; fl.textContent = s.flag;
+        row.appendChild(fl);
+      }
+      card.appendChild(row);
+    });
+
+    // 原始 data（含 <|zh|> 等控制标记）折叠显示，便于与旧版逐字节比对
+    var det = document.createElement("details");
+    det.className = "raw";
+    var sm = document.createElement("summary");
+    sm.textContent = "原始 data（含控制标记）";
+    det.appendChild(sm);
+    var pre = document.createElement("div");
+    pre.textContent = msg.data === undefined ? "" : String(msg.data);
+    det.appendChild(pre);
+    card.appendChild(det);
+
+    el.streamLive.appendChild(card);
+    if (el.autoScroll.checked) el.streamLive.scrollTop = el.streamLive.scrollHeight;
+  }
+
+  // ===== 渲染：汇总句子表 ==================================================
+  function renderTable() {
+    var body = el.sentBody;
+    body.innerHTML = "";
+    var lastSession = null;
+    S.sentences.forEach(function (s, i) {
+      if (s.session !== lastSession) {
+        lastSession = s.session;
+        var dtr = document.createElement("tr");
+        dtr.className = "divider";
+        var dtd = document.createElement("td");
+        dtd.colSpan = 5;
+        dtd.textContent = "— 会话 #" + s.session + " —";
+        dtr.appendChild(dtd);
+        body.appendChild(dtr);
+      }
+
+      var tr = document.createElement("tr");
+      if (s.flag) tr.className = "anomaly";
+
+      var td0 = document.createElement("td");
+      td0.className = "mono"; td0.textContent = (i + 1);
+      tr.appendChild(td0);
+
+      var td1 = document.createElement("td");
+      td1.className = "mono";
+      td1.textContent = fmtClock(s.start_ms) + " → " + fmtClock(s.end_ms) +
+                        "  [" + s.start_ms + " – " + s.end_ms + " ms]";
+      tr.appendChild(td1);
+
+      var td2 = document.createElement("td");
+      td2.className = "mono";
+      td2.textContent = (s.end_ms - s.start_ms) + " ms";
+      tr.appendChild(td2);
+
+      var td3 = document.createElement("td");
+      td3.textContent = s.text + (s.flag ? "  ⚠ " + s.flag : "");
+      tr.appendChild(td3);
+
+      var td4 = document.createElement("td");
+      var btn = document.createElement("button");
+      btn.className = "mini";
+      btn.textContent = "▶";
+      btn.title = "从 " + fmtClock(s.start_ms) + " 播放到 " + fmtClock(s.end_ms);
+      btn.disabled = !S.playbackBuffer;
+      btn.onclick = function () { playRange(s.start_ms, s.end_ms); };
+      td4.appendChild(btn);
+      tr.appendChild(td4);
+
+      body.appendChild(tr);
+    });
+    el.sentCount.textContent = S.sentences.length;
+  }
+
+  // ===== 下行消息处理 ======================================================
+  function handleMessage(raw) {
+    var msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch (e) {
+      rawLog("[非 JSON 帧] " + raw);
+      note("收到无法解析的帧：" + String(raw).slice(0, 80));
+      return;
     }
 
-    var Recorder = function(stream) {
-        var sampleBits = 16; // Sample bits
-        var inputSampleRate = 48000; // Input sample rate
-        var outputSampleRate = 16000; // Output sample rate
-        var channelCount = 1; // Single channel
-        var context = new AudioContext();
-        var audioInput = context.createMediaStreamSource(stream);
-        var recorder = context.createScriptProcessor(4096, channelCount, channelCount);
-        var audioData = {
-            size: 0,
-            buffer: [],
-            inputSampleRate: inputSampleRate,
-            inputSampleBits: sampleBits,
-            clear: function() {
-                this.buffer = [];
-                this.size = 0;
-            },
-            input: function(data) {
-                this.buffer.push(new Float32Array(data));
-                this.size += data.length;
-            },
-            encodePCM: function() {
-                var bytes = new Float32Array(this.size);
-                var offset = 0;
-                for (var i = 0; i < this.buffer.length; i++) {
-                    bytes.set(this.buffer[i], offset);
-                    offset += this.buffer[i].length;
-                }
-                // 使用 float32 接收：直接返回 Float32Array 的 Blob，不需要转换为 int16
-                // return new Blob([bytes], { type: 'audio/float32-pcm' });
+    S.seq += 1;
+    rawLog("#" + S.seq + " " + JSON.stringify(msg));
+    S.messages.push({ seq: S.seq, session: S.session, at_ms: Math.round(S.sentSamples * 1000 / TARGET_RATE), message: msg });
 
-                var dataLength = bytes.length * (sampleBits / 8);
-                var buffer = new ArrayBuffer(dataLength);
-                var data = new DataView(buffer);
-                offset = 0;
-                for (var i = 0; i < bytes.length; i++, offset += 2) {
-                    var s = Math.max(-1, Math.min(1, bytes[i]));
-                    data.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-                }
-                return new Blob([data], { type: 'audio/pcm' });
-            }
+    var sentences = Array.isArray(msg.sentences) ? msg.sentences : [];
+
+    if (msg.code === 0) {
+      S.segCount += 1;
+      // 归一到固定结构，避免服务端字段变动把渲染打崩
+      var norm = sentences.map(function (s) {
+        return {
+          start_ms: Number(s.start_ms) || 0,
+          end_ms: Number(s.end_ms) || 0,
+          text: String(s.text == null ? "" : s.text)
         };
+      });
+      annotateFlags(norm);
+      norm.forEach(function (s) {
+        S.sentences.push({ start_ms: s.start_ms, end_ms: s.end_ms, text: s.text,
+                           flag: s.flag, seq: S.seq, session: S.session });
+      });
+      renderSegmentCard(S.seq, norm, msg);
+      renderTable();
+      refreshBanner();
+      refreshStats();          // 面板与数据保持一致（不能只依赖录音期间的定时刷新，
+                               // 否则关连接后末尾的句子/异常计数会停在旧值）
+      el.clearBtn.disabled = false;
+      el.exportBtn.disabled = false;
+      el.copyBtn.disabled = false;
 
-        this.start = function() {
-            audioInput.connect(recorder);
-            recorder.connect(context.destination);
-        };
+    } else if (msg.code === 2) {
+      // 说话人命中：仅当传入 reg_spks 且验证通过
+      if (el.speakerLog.querySelector(".empty")) el.speakerLog.innerHTML = "";
+      var line = document.createElement("div");
+      line.className = "kv";
+      var k = document.createElement("span");
+      k.className = "k"; k.textContent = "命中 #" + S.seq;
+      var v = document.createElement("span");
+      v.className = "v"; v.textContent = msg.data || "(未提供)";
+      line.appendChild(k); line.appendChild(v);
+      el.speakerLog.appendChild(line);
+      note("说话人命中：" + (msg.data || ""));
 
-        this.stop = function() {
-            recorder.disconnect();
-        };
+    } else if (msg.code === 3) {
+      note("收到 flush 确认（code=3），尾部片段处理完毕，可以安全断开");
+      setStatus("ok", "收尾完成，正在断开");
+      closeSocket();
 
-        this.getBlob = function() {
-            return audioData.encodePCM();
-        };
+    } else {
+      note("收到 code=" + msg.code + " 的消息：" + (msg.info || ""));
+      showBanner("服务端返回 code=" + msg.code + "：" + (msg.info || "(无 info)"), "err");
+    }
+  }
 
-        this.clear = function() {
-            audioData.clear();
-        };
+  // ===== 生命周期 ==========================================================
+  function closeSocket() {
+    if (S.flushTimer) { clearTimeout(S.flushTimer); S.flushTimer = null; }
+    if (S.ws && (S.ws.readyState === WebSocket.OPEN || S.ws.readyState === WebSocket.CONNECTING)) {
+      try { S.ws.close(); } catch (e) {}
+    }
+  }
 
-        function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
-            if (outputSampleRate === inputSampleRate) {
-                return buffer;
-            }
-            var sampleRateRatio = inputSampleRate / outputSampleRate;
-            var newLength = Math.round(buffer.length / sampleRateRatio);
-            var result = new Float32Array(newLength);
-            var offsetResult = 0;
-            var offsetBuffer = 0;
-            while (offsetResult < result.length) {
-                var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-                var accum = 0, count = 0;
-                for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-                    accum += buffer[i];
-                    count++;
-                }
-                result[offsetResult] = accum / count;
-                offsetResult++;
-                offsetBuffer = nextOffsetBuffer;
-            }
-            return result;
+  // 幂等：stop() 与 ws.onclose 都会调
+  function stopCapture() {
+    if (S.sendTimer) { clearInterval(S.sendTimer); S.sendTimer = null; }
+    if (S.clockTimer) { clearInterval(S.clockTimer); S.clockTimer = null; }
+    if (S.processor) {
+      S.processor.onaudioprocess = null;
+      try { S.processor.disconnect(); } catch (e) {}
+      S.processor = null;
+    }
+    if (S.source) { try { S.source.disconnect(); } catch (e) {} S.source = null; }
+    if (S.silentGain) { try { S.silentGain.disconnect(); } catch (e) {} S.silentGain = null; }
+    // 先停录音器再停轨道，保证尾部数据仍会触发 ondataavailable
+    if (S.mediaRecorder && S.mediaRecorder.state !== "inactive") {
+      try { S.mediaRecorder.stop(); } catch (e) {}
+    }
+    if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; }
+    if (S.ctx && S.ctx.state !== "closed") { try { S.ctx.close(); } catch (e) {} }
+    S.ctx = null;
+  }
+
+  function setRecordingUI(on) {
+    S.recording = on;
+    el.recordButton.textContent = on ? "停止录音" : "开始录音";
+    el.recordButton.className = on ? "primary rec" : "primary";
+  }
+
+  function start() {
+    hideBanner(true);
+    var cfg = readConfig();
+    if (!cfg.base) { showBanner("请先填写服务地址。", "err"); return; }
+    if (!cfg.key) { showBanner("请先填写 apiKey。", "err"); return; }
+    if (!window.navigator.mediaDevices || !window.navigator.mediaDevices.getUserMedia) {
+      showBanner("当前浏览器不支持 getUserMedia，请使用 Chrome / Edge / Safari，且在 HTTPS 或 localhost 下打开。", "err");
+      return;
+    }
+
+    // 重置单次会话状态（句子表保留，按会话号分组，便于多次对比）
+    S.session += 1;
+    S.seq = 0; S.segCount = 0; S.sentSamples = 0;
+    S.opened = false; S.stopped = false;
+    S.pending = []; S.pendingLen = 0;
+    S.messages = []; S.prevEndMs = null;
+    S.mediaChunks = []; S.playbackBuffer = null; S.playbackSrc = null;
+    el.rawLog.textContent = "";
+    el.kvCalib.textContent = "—";
+    refreshStats();
+
+    var url = buildUrl(cfg);
+    el.kvUrl.textContent = url.replace(/apiKey=[^&]+/, "apiKey=***");
+    el.kvFlush.textContent = "发 flush，等 code=3（超时 " + FLUSH_TIMEOUT_MS + " ms 则强制关闭）";
+
+    setStatus("wait", "请求麦克风权限…");
+
+    window.navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    }).then(function (stream) {
+      S.stream = stream;
+      setStatus("wait", "正在建立 WebSocket…");
+      try {
+        S.ws = new WebSocket(url);
+      } catch (e) {
+        showBanner("WebSocket 地址无效：" + e.message, "err");
+        stream.getTracks().forEach(function (t) { t.stop(); });
+        S.stream = null;
+        setStatus("bad", "地址无效");
+        return;
+      }
+      S.ws.binaryType = "arraybuffer";
+
+      S.ws.onopen = function () {
+        S.opened = true;
+        setRecordingUI(true);
+        setStatus("live", "已连接 · 正在推流");
+        note("WebSocket 已连接，按 " + CHUNK_MS + "ms 整块推流（16kHz / 16bit / 单声道）");
+        startCapture();
+        S.sendTimer = setInterval(drainChunks, SEND_TICK_MS);
+        S.clockTimer = setInterval(refreshStats, 200);
+      };
+
+      S.ws.onmessage = function (evt) {
+        if (typeof evt.data === "string") handleMessage(evt.data);
+        else note("收到意外的二进制下行帧，已忽略");
+      };
+
+      S.ws.onerror = function () {
+        note("WebSocket 发生错误（详情见浏览器控制台）");
+      };
+
+      S.ws.onclose = function (evt) {
+        var everOpened = S.opened;
+        stopCapture();
+        setRecordingUI(false);
+        S.ws = null;
+        if (S.pendingLen > 0) {
+          note("丢弃未满 " + CHUNK_MS + "ms 的尾部音频 " + S.pendingLen + " 个样本（服务端同样只处理整块）");
         }
+        if (!everOpened && S.stopped) {
+          // 用户在握手完成前主动点了停止 —— 这不是错误，别报「握手失败」
+          setStatus("idle", "已取消（未连接）");
+          note("已在建立连接前取消本次会话");
+        } else if (!everOpened) {
+          // 握手阶段就被拒。注意：服务端在 accept() 之前 close(code=1008)，
+          // Starlette 会把它表现为 HTTP 403 握手拒绝 —— 浏览器拿不到关闭码，只报 1006。
+          // 因此这里不能只判 1008（那是永远走不到的分支），见 docs/API.md §6.6。
+          setStatus("bad", "握手被拒");
+          showBanner("WebSocket 握手失败（浏览器报 code=" + evt.code + "，对应服务端返回的 HTTP 403）。" +
+                     "最常见原因是 apiKey 缺失或错误；也请确认地址/端口/网关子路径正确，" +
+                     "且页面非 HTTPS 时不要连 wss://（反之 HTTPS 页面连 ws:// 会被混合内容策略拦截）。", "err");
+        } else if (evt.code === 1008) {
+          setStatus("bad", "被拒绝（1008）");
+          showBanner("连接被拒绝（关闭码 1008）：apiKey 缺失或错误。", "err");
+        } else if (evt.code === 1000 || evt.code === 1005) {
+          setStatus("ok", "已断开");
+        } else {
+          setStatus("bad", "异常关闭（" + evt.code + "）");
+          showBanner("连接异常关闭，code=" + evt.code + (evt.reason ? "，reason=" + evt.reason : ""), "err");
+        }
+        note("连接关闭 code=" + evt.code + (evt.reason ? " reason=" + evt.reason : ""));
+      };
+    }).catch(function (err) {
+      setStatus("bad", "麦克风不可用");
+      showBanner("无法获取麦克风：" + err.message + "（非 localhost 环境需 HTTPS）", "err");
+    });
+  }
 
-        recorder.onaudioprocess = function(e) {
-            console.log('onaudioprocess called');
-            var resampledData = downsampleBuffer(e.inputBuffer.getChannelData(0), inputSampleRate, outputSampleRate);
-            audioData.input(resampledData);
-        };
+  function stop() {
+    if (!S.ws && !S.recording) return;
+    S.stopped = true;                 // 标记为主动停止，供 onclose 区分「握手被拒」与「用户取消」
+    setRecordingUI(false);
+    setStatus("wait", "正在收尾（flush）…");
+
+    // 1) 立刻停止采集，不再产生新音频
+    if (S.processor) {
+      S.processor.onaudioprocess = null;
+      try { S.processor.disconnect(); } catch (e) {}
+    }
+    if (S.sendTimer) { clearInterval(S.sendTimer); S.sendTimer = null; }
+
+    // 2) 把已凑满的整块发完（服务端只对 300ms 整块做 VAD）
+    drainChunks();
+
+    // 3) 先收尾本地录音器（保证尾部数据到手），再关麦克风轨道
+    if (S.mediaRecorder && S.mediaRecorder.state !== "inactive") {
+      try { S.mediaRecorder.stop(); } catch (e) {}
+    }
+    if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); }
+    if (S.silentGain) { try { S.silentGain.disconnect(); } catch (e) {} }
+    if (S.ctx && S.ctx.state !== "closed") { try { S.ctx.close(); } catch (e) {} }
+
+    // 4) 发 flush 换尾部片段，等 code=3 再关；等不到就超时兜底
+    if (S.ws && S.ws.readyState === WebSocket.OPEN) {
+      S.ws.send("flush");
+      note("已发送 flush，等待 code=3 收尾确认");
+      S.flushTimer = setTimeout(function () {
+        S.flushTimer = null;
+        note("未在 " + FLUSH_TIMEOUT_MS + "ms 内收到 code=3，强制关闭（尾部片段可能丢失）");
+        closeSocket();
+      }, FLUSH_TIMEOUT_MS);
+    } else {
+      closeSocket();
+    }
+  }
+
+  // ===== 导出 ==============================================================
+  function buildExport() {
+    return {
+      exported_at: new Date().toISOString(),
+      ws_url: el.kvUrl.textContent,               // 已脱敏，不写入 apiKey
+      lang: el.lang.value.trim(),
+      reg_spks: el.regSpks.value.trim(),
+      pushed_audio_ms: Math.round(S.sentSamples * 1000 / TARGET_RATE),
+      session_count: S.session,
+      message_count: S.messages.length,
+      segment_count: S.segCount,
+      sentences: S.sentences.map(function (s) {
+        return { session: s.session, seq: s.seq, start_ms: s.start_ms, end_ms: s.end_ms,
+                 text: s.text, flag: s.flag || "" };
+      }),
+      messages: S.messages.map(function (m) {
+        return { session: m.session, seq: m.seq, at_ms: m.at_ms, message: m.message };
+      })
     };
+  }
 
+  function download(name, text, type) {
+    var blob = new Blob([text], { type: type || "text/plain;charset=utf-8" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  function sentencesTsv() {
+    var head = ["#", "session", "start_ms", "end_ms", "start", "end", "duration_ms", "flag", "text"].join("\t");
+    var rows = S.sentences.map(function (s, i) {
+      return [i + 1, s.session, s.start_ms, s.end_ms, fmtClock(s.start_ms), fmtClock(s.end_ms),
+              s.end_ms - s.start_ms, s.flag || "", '"' + s.text.replace(/"/g, '""') + '"'].join("\t");
+    });
+    return head + "\n" + rows.join("\n") + "\n";
+  }
+
+  // ===== 事件绑定 ==========================================================
+  el.recordButton.onclick = function () {
+    if (S.recording || S.ws) stop(); else start();
+  };
+
+  el.clearBtn.onclick = function () {
+    S.sentences = []; S.prevEndMs = null;
+    el.streamLive.innerHTML = '<div class="empty">点击「开始录音」后，每个闭合的 VAD 片段会作为一张卡片出现在这里</div>';
+    el.speakerLog.innerHTML = '<div class="empty" style="padding:8px 4px">本次会话未传入 reg_spks，或尚未命中</div>';
+    el.rawLog.textContent = "";
+    hideBanner(true);
+    renderTable();
+    refreshStats();
+    note("已清空结果（不影响正在进行的会话）");
+  };
+
+  el.exportBtn.onclick = function () {
+    var stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    download("ws_transcribe_" + stamp + ".json", JSON.stringify(buildExport(), null, 2), "application/json");
+    note("已导出 JSON（含全部下行消息与句子表）");
+  };
+
+  el.copyBtn.onclick = function () {
+    var tsv = sentencesTsv();
+    var done = function () { note("已复制 " + S.sentences.length + " 行句子表（TSV，可直接粘贴进 Excel）"); };
+    if (window.navigator.clipboard && window.navigator.clipboard.writeText) {
+      window.navigator.clipboard.writeText(tsv).then(done, function () { download("sentences.tsv", tsv); });
+    } else {
+      download("sentences.tsv", tsv);
+    }
+  };
+
+  Array.prototype.forEach.call(document.querySelectorAll("button[data-preset]"), function (btn) {
+    btn.onclick = function () {
+      var which = btn.getAttribute("data-preset");
+      if (which === "local") el.wsUrl.value = "ws://127.0.0.1:27000/" + WS_PATH;
+      else if (which === "prod") el.wsUrl.value = PROD_URL;
+      else el.wsUrl.value = pageDerivedUrl() || ("ws://127.0.0.1:27000/" + WS_PATH);
+      note("服务地址已切换为 " + el.wsUrl.value);
+    };
+  });
+
+  // ===== 初始化 ============================================================
+  el.wsUrl.value = pageDerivedUrl() || "ws://127.0.0.1:27000/" + WS_PATH;
+  el.apiKey.value = DEFAULT_KEY;
+  renderTable();
+  refreshStats();
+
+  if (window.location.protocol === "file:") {
+    note("检测到以 file:// 打开。若无法连接，请改用本地 http 服务打开本页（项目根目录执行 python -m http.server 8000）。");
+  }
+  note("就绪。上行分块 " + CHUNK_SAMPLES + " 样本 / " + CHUNK_MS + " ms；sentences 时间戳基准为音频流起点。");
+})();
 </script>
+</body>
 </html>

@@ -1,0 +1,11 @@
+# 离线 wheel 仓库（wheelhouse）
+#
+# 本目录用于存放离线构建所需的 Python wheel。构建镜像时会被整体拷入
+# pydeps 阶段，配合 NET_MODE=offline 以 `pip install --no-index --find-links` 安装。
+#
+# 本文件仅用于占位，保证 `COPY wheelhouse/ ...` 在目录为空时也不会失败。
+#
+# 生成方式（在【联网】机器上执行）：
+#   bash scripts/prepare_offline_bundle.sh
+#
+# 生成后本目录会出现大量 *.whl（约 1.5 GB），已由 .gitignore 忽略。

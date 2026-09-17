@@ -1,0 +1,86 @@
+# =============================================================================
+# docker-compose.yml —— voice-analyzer-service
+#
+# 只有两个服务：
+#   deps（profile online）  把构建要用的本地依赖下到宿主机 ./debhouse + ./wheelhouse
+#   app （默认 profile）    用本地依赖构建并启动服务；构建期零网络
+#
+# 有依赖就直接构建启动，没依赖就先下到本地 —— 一条命令：
+#   sh scripts/build.sh
+#
+# 手动等价命令
+#   docker compose --profile online run --rm deps    # 只在需要下载时才跑
+#   docker compose up -d --build                    # 每次构建 + 启动（零网络）
+#
+# 为什么依赖下载放在 compose 而不是 Dockerfile：
+#   docker build 的构建上下文是只读输入，RUN 生成的文件只留在镜像层、写不回宿主机。
+#   而容器的 bind mount 可以 —— 所以下载交给 `docker compose run` 的 deps 容器。
+#   之后 Dockerfile 构建就只吃本地文件，一次网络请求都不发。
+#
+# 可覆盖变量见 .env.example
+# =============================================================================
+
+name: voice-analyzer
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # app —— 应用服务：只吃本地 ./debhouse 与 ./wheelhouse，构建期不发任何网络请求
+  #   构建：docker compose build app      启动：docker compose up -d
+  # ---------------------------------------------------------------------------
+  app:
+    image: ${IMAGE_TAG:-voice-analyzer:1.0}
+    build:
+      context: .
+      target: runtime
+      # 构建期断开网络（硬保险）：只要构建成功，就证明本地物料自足。
+      # Dockerfile 里本身没有任何 apt / pip 联网动作。
+      network: none
+      args:
+        PY_BASE: ${PY_BASE:-python:3.10-slim}
+    container_name: voice-analyzer
+    ports:
+      - "27000:27000"
+    restart: unless-stopped
+    # 运行期同样不需要外网：模型已内置 /app/models，并设了 HF_HUB_OFFLINE=1 等硬开关。
+    # 这里不做 network_mode: none —— 那会让 -p 端口映射失效，服务就访问不到了。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # deps —— 联网抓依赖：把两样东西下到【宿主机】本地目录
+  #     docker compose --profile online run --rm deps
+  #       ./debhouse/*.deb    系统依赖闭包（libsndfile1 / ffmpeg 及其依赖）
+  #       ./wheelhouse/*.whl  Python 依赖（含只有 sdist 的包，现场编成 wheel）
+  #
+  # 镜像直接用官方 python:3.10-slim，不额外构建「工具镜像」——它只需要 apt + pip，
+  # 编译工具（gcc 等）由脚本在容器运行时临时装上。
+  #
+  # 写入的 /debhouse、/wheelhouse 正是宿主机目录（bind mount）—— 这就是
+  # 「docker build 拿不到文件」的解法：容器挂载能真实写回宿主机。
+  # 幂等：两份目录都已有内容时约 2 秒直接跳过；CLEAN=1 强制全量重抓。
+  # ---------------------------------------------------------------------------
+  deps:
+    profiles: ["online"]
+    image: ${PY_BASE:-python:3.10-slim}
+    entrypoint: ["sh", "/opt/scripts/fetch_deps.sh"]
+    environment:
+      DEB_DEST: /debhouse
+      WHEEL_DEST: /wheelhouse
+      APT_DEBIAN_URL: ${APT_DEBIAN_URL:-https://mirrors.ustc.edu.cn/debian}
+      APT_SECURITY_URL: ${APT_SECURITY_URL:-https://mirrors.ustc.edu.cn/debian-security}
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+      PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://mirror.sjtu.edu.cn/pytorch-wheels/cpu}
+      PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+      CLEAN: ${CLEAN:-0}
+    volumes:
+      # 抓取脚本（只读挂载，容器里不需要改动它）
+      - ./scripts:/opt/scripts:ro
+      # 依赖清单（只读挂载；requirements.txt 是 UTF-16，脚本里会显式解码）
+      - ./requirements.txt:/opt/req/requirements.txt:ro
+      # 容器写入 → 宿主机本地目录，唯一的输出通道
+      - ./debhouse:/debhouse
+      - ./wheelhouse:/wheelhouse

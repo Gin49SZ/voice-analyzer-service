@@ -36,12 +36,53 @@ GPU 模式：
 python server.py --port 27000 --gpu true
 ```
 
-### Docker
+### Docker 部署
+
+依赖全部放在本地目录，**构建期零网络**（compose 给 `app` 设了 `build.network: none`）：
+
+| 本地物料 | 内容 | 来源 |
+|---|---|---|
+| `debhouse/*.deb` | 系统依赖 libsndfile1 / ffmpeg 及其依赖闭包，约 128 MB | `deps` 服务 |
+| `wheelhouse/*.whl` | Python 依赖，111 个 wheel，约 710 MB | `deps` 服务 |
+| `models/` | 离线模型，约 1 GB | 单独拷入 |
+| `python:3.10-slim` | 基础镜像 | `docker pull`，或从别处 `docker load` |
+
+**有依赖就直接构建启动，没依赖就先下到本地** —— 一条命令：
 
 ```bash
-docker build -t voice-analyzer .
-docker run -p 27000:27000 voice-analyzer
+sh scripts/build.sh
 ```
+
+它内部做的事（也可以自己敲）：
+
+```bash
+# 只在本地依赖不全时才需要，需要外网
+docker compose --profile online run --rm deps    # → 宿主机 ./debhouse + ./wheelhouse
+
+# 每次构建 + 启动，零网络
+docker compose up -d --build
+```
+
+> - 依赖下载放在 `docker compose run`（容器运行期 + bind mount 到宿主机）而不是 Dockerfile 里：
+>   `docker build` 只能**读**构建上下文、**写不回宿主机**，容器的 bind mount 可以。
+> - 本地 `.deb` / `.whl` 在 Dockerfile 里用 `RUN --mount=type=bind` **挂载**安装，不 `COPY` 进镜像 ——
+>   否则那 128 MB + 710 MB 会永久留在镜像层里，事后 `rm` 也减不掉体积。
+
+**日常操作**
+
+```bash
+docker compose logs -f app           # 日志
+docker compose restart app           # 重启
+docker compose down                  # 停止并删除容器
+docker compose ps                    # 状态
+curl http://127.0.0.1:27000/health
+```
+
+换源、镜像名等可覆盖变量见 [`.env.example`](.env.example)。
+
+产出的镜像**运行期完全离线**：模型内置、`local_files_only=True` 加载，并设置 `HF_HUB_OFFLINE=1` 等变量。
+
+> 镜像为 CPU 版（`torch==2.3.0+cpu`），体积约 6.4 GB（模型约 1 GB），冷启动 75 秒起（机器繁忙时可达 4 分钟，故 `HEALTHCHECK --start-period=300s`），建议容器内存 ≥ 4 GB。已实测：构建期与运行期均可完全断网，`/health`、`/transcribe`、`WS /ws/transcribe` 三条路径全部可用。
 
 ## API 接口
 
@@ -106,7 +147,8 @@ SenseVoice（`model.py`）**不输出任何时间戳**，因此时间信息取�
 
 - 精度：**片段级时间为 VAD 实测边界**（实验验证：与真值偏差多在 0～310ms 内），**片段内多句的中间边界为近似值**；
 - 不修改模型与加载方式，仍为 `local_files_only=True` 本地加载；
-- 实验与验证脚本见 `tmp/`：`test_vad_timing.py`（片段时间 vs 真值）、`test_asr_segments.py`（分段+逐段转写）、`test_timestamp_protocol.py`（两条链路的协议级回归）。
+- 实测（`examples/test.wav`，约 73 s）：`HTTP → HTTP → 完整 WS 会话 → HTTP` 连续四次，`sentences` 完全一致（各 23 条、时间单调、无零长与重叠），说明 WS 会话不会污染后续 HTTP 的 VAD 参数（该陷阱的成因与防护见 [`docs/API.md` §7.5](docs/API.md)）；
+- `data` 纯文本字段偶发差一个标点，属 ITN 环节抖动，与时间信息无关（见 [`docs/API.md` §7.6](docs/API.md)）。
 
 ## 配置
 
